@@ -1,4 +1,3 @@
-// CommonController.java 파일
 package com.example.pknu_backend.Controller;
 
 import jakarta.persistence.EntityManager;
@@ -69,6 +68,8 @@ public class CommonController {
             entityManager.createNativeQuery(createBasempImageTableSql).executeUpdate();
             log.info("Table 'basemp_image' created or already exists.");
 
+            // lost_found_items 테이블에 status 컬럼이 ENUM('ACTIVE', 'RESOLVED')으로 설정되어 있는지 확인 (없다면 추가/수정)
+            // PostConstruct에서 테이블 생성 쿼리에 이미 포함되어 있음을 확인했습니다.
             String createLostFoundItemsTableSql = "CREATE TABLE IF NOT EXISTS `lost_found_items` (" +
                     "`item_id` INT AUTO_INCREMENT PRIMARY KEY," +
                     "`item_type` ENUM('LOST', 'FOUND') NOT NULL," +
@@ -78,7 +79,7 @@ public class CommonController {
                     "`item_date` DATE," +
                     "`contact_info` VARCHAR(255)," +
                     "`image_url` VARCHAR(255)," +
-                    "`status` ENUM('ACTIVE', 'RESOLVED') DEFAULT 'ACTIVE'," +
+                    "`status` ENUM('ACTIVE', 'RESOLVED') DEFAULT 'ACTIVE'," + // ⭐ status 필드 확인
                     "`posted_by_userid` VARCHAR(10) NOT NULL," +
                     "`posted_at` DATETIME DEFAULT CURRENT_TIMESTAMP," +
                     "FOREIGN KEY (`posted_by_userid`) REFERENCES `basemp`(`empnum`) ON DELETE CASCADE" +
@@ -221,140 +222,43 @@ public class CommonController {
         }
     }
 
+    @PutMapping("/api/items/{itemId}")
+    @Transactional
+    public ResponseEntity<?> updateItem(@PathVariable int itemId, @RequestBody Map<String, Object> itemData) {
+        try {
+            String updateSql = "UPDATE lost_found_items SET item_type=?, title=?, description=?, location=?, item_date=?, contact_info=?, image_url=?, status=? WHERE item_id=?";
+            Query query = entityManager.createNativeQuery(updateSql);
+            query.setParameter(1, itemData.get("itemType"));
+            query.setParameter(2, itemData.get("title"));
+            query.setParameter(3, itemData.get("description"));
+            query.setParameter(4, itemData.get("location"));
+            query.setParameter(5, LocalDate.parse((String) itemData.get("itemDate")));
+            query.setParameter(6, itemData.get("contactInfo"));
+            query.setParameter(7, itemData.get("imageUrl"));
+            query.setParameter(8, itemData.get("status"));
+            query.setParameter(9, itemId);
+            int result = query.executeUpdate();
+            return result > 0 ? ResponseEntity.ok("수정 완료") : ResponseEntity.status(404).body("해당 항목 없음");
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().body("수정 실패: " + e.getMessage());
+        }
+    }
+
     @DeleteMapping("/api/items/{itemId}")
     @Transactional
-    public ResponseEntity<?> deleteItem(@PathVariable Long itemId, @RequestParam("postedByUserId") String postedByUserId) {
+    public ResponseEntity<?> deleteItem(@PathVariable("itemId") int itemId) {
         try {
-            String checkSql = "SELECT posted_by_userid, image_url FROM lost_found_items WHERE item_id = ?";
-            Query checkQuery = entityManager.createNativeQuery(checkSql);
-            checkQuery.setParameter(1, itemId);
-            Object[] result = (Object[]) checkQuery.getSingleResult();
-            String actualUserId = (String) result[0];
-            String imageUrl = (String) result[1];
-
-            if (!actualUserId.equals(postedByUserId)) {
-                return ResponseEntity.status(HttpStatus.FORBIDDEN).body("삭제 권한 없음");
-            }
-
-            Query deleteQuery = entityManager.createNativeQuery("DELETE FROM lost_found_items WHERE item_id = ?");
-            deleteQuery.setParameter(1, itemId);
-            deleteQuery.executeUpdate();
-
-            if (imageUrl != null && !imageUrl.isEmpty()) {
-                Path path = Paths.get(uploadDir, imageUrl.substring(imageUrl.lastIndexOf('/') + 1));
-                Files.deleteIfExists(path);
-            }
-
-            return ResponseEntity.ok("OK");
-
-        } catch (NoResultException e) {
-            return ResponseEntity.status(HttpStatus.NOT_FOUND).body("게시물 없음");
+            String deleteSql = "DELETE FROM lost_found_items WHERE item_id = ?";
+            Query query = entityManager.createNativeQuery(deleteSql);
+            query.setParameter(1, itemId);
+            int result = query.executeUpdate();
+            return result > 0 ? ResponseEntity.ok("삭제 완료") : ResponseEntity.status(404).body("해당 항목 없음");
         } catch (Exception e) {
-            log.error("삭제 실패: {}", e.getMessage());
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("삭제 실패: " + e.getMessage());
+            return ResponseEntity.internalServerError().body("삭제 실패: " + e.getMessage());
         }
     }
 
-    // 게시물 수정
-    // ⭐ @PathVariable Long itemId를 @RequestPart("itemId") Long itemId로 변경
-    @PutMapping(value = "/api/items", consumes = {MediaType.MULTIPART_FORM_DATA_VALUE}) // ⭐ URL에서 {itemId} 제거
-    @Transactional
-    public ResponseEntity<?> updateItem(
-            // ⭐ itemId를 @RequestPart로 받도록 변경
-            @RequestPart("itemId") Long itemId, // itemId는 필수이므로 required = false 제거
-            @RequestPart(required = false) MultipartFile imageFile,
-            @RequestPart("itemType") String itemType,
-            @RequestPart("title") String title,
-            @RequestPart("description") String description,
-            @RequestPart("location") String location,
-            @RequestPart("itemDate") String itemDateStr,
-            @RequestPart("contactInfo") String contactInfo,
-            @RequestPart("status") String status,
-            @RequestPart("postedByUserId") String postedByUserId
-    ) {
-        log.info("수정 요청: itemId={}, title={}, imageFile={}", itemId, title, imageFile != null ? imageFile.getOriginalFilename() : "없음");
-        log.info("itemType: {}, description: {}, location: {}", itemType, description, location); // 추가 로깅
-        log.info("itemDateStr: {}, contactInfo: {}, status: {}, postedByUserId: {}", itemDateStr, contactInfo, status, postedByUserId); // 추가 로깅
 
-        try {
-            // ... (기존 로직)
-
-            // 기존 게시물 작성자 확인
-            // 이 쿼리에서 itemId를 사용합니다.
-            String ownerSql = "SELECT posted_by_userid, image_url FROM lost_found_items WHERE item_id = ?";
-            Query ownerQuery = entityManager.createNativeQuery(ownerSql);
-            ownerQuery.setParameter(1, itemId); // ⭐ 여기서는 이미 Long 타입의 itemId를 사용
-
-            List<Object[]> ownerResults = ownerQuery.getResultList();
-            if (ownerResults.isEmpty()) {
-                log.error("수정할 게시물을 찾을 수 없습니다 (itemId: {})", itemId); // 추가 로깅
-                return ResponseEntity.status(HttpStatus.NOT_FOUND).body("게시물을 찾을 수 없습니다.");
-            }
-            Object[] ownerResult = (Object[]) ownerResults.get(0); // getSingleResult() 대신 getResultList() 사용 권장
-            String actualPostedBy = (String) ownerResult[0];
-            String oldImageUrl = (String) ownerResult[1];
-
-            if (!actualPostedBy.equals(postedByUserId)) {
-                return ResponseEntity.status(HttpStatus.FORBIDDEN).body("권한 없음");
-            }
-
-            LocalDate itemDate = null;
-            if (itemDateStr != null && !itemDateStr.trim().isEmpty()) {
-                try {
-                    itemDate = LocalDate.parse(itemDateStr);
-                } catch (java.time.format.DateTimeParseException e) {
-                    log.error("날짜 파싱 오류: {} (itemId: {}): {}", itemDateStr, itemId, e.getMessage(), e);
-                    return ResponseEntity.badRequest().body("날짜 형식이 올바르지 않습니다. (YYYY-MM-DD)");
-                }
-            } else {
-                log.warn("itemDateStr이 비어있습니다 (itemId: {}). DB에 NULL로 저장될 수 있습니다.", itemId);
-            }
-
-
-            String newImageUrl = oldImageUrl;
-
-            if (imageFile != null && !imageFile.isEmpty()) {
-                String originalFilename = imageFile.getOriginalFilename();
-                String fileExtension = "";
-                if (originalFilename != null && originalFilename.contains(".")) {
-                    fileExtension = originalFilename.substring(originalFilename.lastIndexOf("."));
-                }
-                String uniqueFileName = UUID.randomUUID().toString() + fileExtension;
-                Path filePath = Paths.get(uploadDir, uniqueFileName);
-                Files.copy(imageFile.getInputStream(), filePath);
-                newImageUrl = "/uploads/" + uniqueFileName;
-
-                if (oldImageUrl != null && !oldImageUrl.isEmpty()) {
-                    Path oldImagePath = Paths.get(uploadDir, oldImageUrl.substring(oldImageUrl.lastIndexOf('/') + 1));
-                    Files.deleteIfExists(oldImagePath);
-                    log.info("기존 이미지 삭제 완료: {}", oldImagePath);
-                }
-            }
-
-            String updateSql = "UPDATE lost_found_items SET item_type = ?, title = ?, description = ?, location = ?, item_date = ?, contact_info = ?, image_url = ?, status = ? WHERE item_id = ?";
-            Query updateQuery = entityManager.createNativeQuery(updateSql);
-            updateQuery.setParameter(1, itemType);
-            updateQuery.setParameter(2, title);
-            updateQuery.setParameter(3, description);
-            updateQuery.setParameter(4, location);
-            updateQuery.setParameter(5, itemDate);
-            updateQuery.setParameter(6, contactInfo);
-            updateQuery.setParameter(7, newImageUrl);
-            updateQuery.setParameter(8, status);
-            updateQuery.setParameter(9, itemId);
-
-            int updated = updateQuery.executeUpdate();
-            return updated > 0 ? ResponseEntity.ok("OK") : ResponseEntity.status(HttpStatus.NOT_FOUND).body("게시물 없음");
-
-        } catch (NoResultException e) {
-            log.error("수정할 게시물을 찾을 수 없습니다 (itemId: {}): {}", itemId, e.getMessage());
-            return ResponseEntity.status(HttpStatus.NOT_FOUND).body("수정할 게시물을 찾을 수 없습니다.");
-        }
-        catch (Exception e) {
-            log.error("게시물 수정 최종 오류 (itemId: {}): {}", itemId, e.getMessage(), e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("수정 실패: " + e.getMessage());
-        }
-    }
 
     @PostMapping("/api/login1")
     public ResponseEntity login1(@RequestBody Map<String, String> params, HttpServletResponse res) {
@@ -385,36 +289,7 @@ public class CommonController {
             return ResponseEntity.internalServerError().body("Exception: Login failed");
         }
     }
-    //    @PostMapping("/api/login7")
-//    public ResponseEntity<?> login7(@RequestBody Map<String, String> params) {
-//        String server_username = params.get("s_username");
-//        log.info("넘어온 검색이름: {}", server_username);
-//        String sql = "SELECT * FROM basemp WHERE empnam LIKE ?";
-//        try {
-//            Query query = entityManager.createNativeQuery(sql);
-//            query.setParameter(1, server_username + '%');
-//            List<Object[]> results = query.getResultList();
-//            log.info("results: {}", results);
-//            if (!results.isEmpty()) {
-//                List<Map<String, Object>> resultList = new ArrayList<>();
-//                for (Object[] row : results) {
-//                    Map<String, Object> resultMap = new HashMap<>();
-//                    resultMap.put("userid", row[0]);
-//                    resultMap.put("userpass", row[1]);
-//                    resultMap.put("username", row[2]);
-//                    resultMap.put("usermail", row[3]);
-//                    resultList.add(resultMap);
-//                }
-//                log.info("조회 결과: {}", resultList);
-//                return ResponseEntity.ok(resultList);
-//            } else {
-//                return ResponseEntity.ok(Map.of("status", "NOT_FOUND"));
-//            }
-//        } catch (Exception e) {
-//            log.error("Login error: ", e);
-//            return ResponseEntity.internalServerError().body("Exception Login failed");
-//        }
-//    }
+
     @PostMapping("/api/register")
     @Transactional
     public ResponseEntity<?> registerUser(@RequestBody Map<String, String> params) {
@@ -437,56 +312,5 @@ public class CommonController {
             return ResponseEntity.internalServerError().body("ERROR: " + e.getMessage());
         }
     }
-//    @PostMapping("/api/update")
-//    @Transactional
-//    public ResponseEntity<?> updateUser(@RequestBody Map<String, String> params) {
-//        String userid = params.get("userid");
-//        String userpass = params.get("userpass");
-//        String username = params.get("username");
-//        String usermail = params.get("usermail");
-//        String sql = "UPDATE basemp SET emppas = ?, empnam = ?, empmal = ? WHERE empnum = ?";
-//        try {
-//            Query query = entityManager.createNativeQuery(sql);
-//            query.setParameter(1, userpass);
-//            query.setParameter(2, username);
-//            query.setParameter(3, usermail);
-//            query.setParameter(4, userid);
-//            int updatedCount = query.executeUpdate();
-//            if (updatedCount > 0) {
-//                return ResponseEntity.ok("OK");
-//            } else {
-//                return ResponseEntity.ok("NOT_FOUND");
-//            }
-//        } catch (Exception e) {
-//            log.error("업데이트 실패:", e);
-//            return ResponseEntity.internalServerError().body("ERROR: " + e.getMessage());
-//        }
-//    }
-//    @PostMapping("/api/deleteMultiple")
-//    @Transactional
-//    public ResponseEntity<?> deleteMultipleUsers(@RequestBody Map<String, List<String>> params) {
-//        List<String> userids = params.get("userids");
-//        log.info("다중 삭제 요청 받은 userids: {}", userids);
-//        if (userids == null || userids.isEmpty()) {
-//            return ResponseEntity.badRequest().body("userids가 비어있음");
-//        }
-//        String placeholders = String.join(",", userids.stream().map(id -> "?").toArray(String[]::new));
-//        String sql = "DELETE FROM basemp WHERE empnum IN (" + placeholders + ")";
-//        try {
-//            Query query = entityManager.createNativeQuery(sql);
-//            for (int i = 0; i < userids.size(); i++) {
-//                query.setParameter(i + 1, userids.get(i));
-//            }
-//            int deletedCount = query.executeUpdate();
-//            log.info("삭제된 행 수: {}", deletedCount);
-//            if (deletedCount > 0) {
-//                return ResponseEntity.ok("OK");
-//            } else {
-//                return ResponseEntity.ok("NOT_FOUND");
-//            }
-//        } catch (Exception e) {
-//            log.error("다중 삭제 실패:", e);
-//            return ResponseEntity.internalServerError().body("ERROR: " + e.getMessage());
-//        }
-//    }
+
 }
